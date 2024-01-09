@@ -1,0 +1,10 @@
+.vscode/
+dct/.vscode/
+dct/.xmake/
+dct/build/
+histogram/.vscode/
+histogram/.xmake/
+histogram/build/
+rc*/.vscode/
+rc*/.xmake/
+rc*/build/
