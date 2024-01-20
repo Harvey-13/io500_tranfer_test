@@ -63,12 +63,20 @@ public:
                     };
         if(rdma_create_qp(cm_id_, pd_, &qp_init_attr))LOG(__LINE__, "failed to create qp");
         rdma_conn_param conn_param{};
+        conn_param.initiator_depth = 1;
+        conn_param.retry_count = 7;
         if(rdma_connect(cm_id_, &conn_param))LOG(__LINE__, "failed to connect");
-        remote_bg_= remote_ptr_ =(uint64_t)((CData*)conn_param.private_data)->data;
-        rkey_ = ((CData*)conn_param.private_data)->rkey;
         if(rdma_get_cm_event(chan_, &event))LOG(__LINE__, "failed to get cm event");
 
         if(event->event != RDMA_CM_EVENT_ESTABLISHED)LOG(__LINE__, "failed to establish connect");
+        CData cdata{};
+        memcpy(&cdata, conn_param.private_data, sizeof(cdata));
+
+        remote_bg_= (uintptr_t)cdata.data;
+        rkey_ = cdata.rkey;
+        remote_mr_ = ibv_reg_mr(pd_, &remote_offset_, 8, IBV_ACCESS_LOCAL_WRITE|
+                                                              IBV_ACCESS_REMOTE_READ|
+                                                              IBV_ACCESS_REMOTE_WRITE);
         rdma_ack_cm_event(event);
         // msg_mr_ = ibv_reg_mr(pd_, msg_buf_, sizeof(msg_buf_), IBV_ACCESS_LOCAL_WRITE|
         //                                                       IBV_ACCESS_REMOTE_READ|
@@ -102,7 +110,7 @@ public:
                 .send_flags = IBV_SEND_SIGNALED,
                 .wr{
                     .rdma{
-                    .remote_addr = remote_ptr_,
+                    .remote_addr = remote_offset_+remote_bg_,
                     .rkey = rkey_
                     }
                 }
@@ -112,14 +120,13 @@ public:
         if(ibv_post_send(cm_id_->qp, &wr, &bad_wr))LOG(__LINE__, "failed to post send");
         wc_wait_++;
         wc_wait_ -= ibv_poll_cq(cq_,cq_len,wc_);
-        remote_ptr_ += grain;
     }
-    void update_remote_offset(void* msg, uint64_t offset){
+    void update_remote_offset(){
         while(wc_wait_>=cq_len)wc_wait_ -= ibv_poll_cq(cq_,cq_len,wc_);
         ibv_sge sge{
-                .addr = (uint64_t)msg+offset,
+                .addr = (uintptr_t)&remote_offset_,
                 .length = 8,
-                .lkey = outer_mr_map_[msg]->lkey
+                .lkey = remote_mr_->lkey
             };
             ibv_send_wr wr{
                 .next = nullptr,
@@ -165,6 +172,7 @@ private:
     ibv_cq *cq_{};
     ibv_wc wc_[cq_len]{};
     std::map<void*, ibv_mr*> outer_mr_map_{};
-    uint64_t wc_wait_{}, rkey_{}, remote_ptr_{}, remote_bg_{};
+    uint64_t wc_wait_{}, rkey_{}, remote_offset_{}, remote_bg_{};
+    ibv_mr* remote_mr_{};
     
 };

@@ -5,6 +5,9 @@ public:
     RDMAForwarder() = default;
     void transfer(char* source, char* dest, int listen_port){
         strncpy(dest_, dest, strlen(dest));
+
+        int num_devices{};
+        ctx_list_ = rdma_get_devices(&num_devices);
         chan_ = rdma_create_event_channel();
         if(!chan_)LOG(__LINE__, "failed to create event channel");
 
@@ -19,10 +22,8 @@ public:
         }
         };
         if(rdma_bind_addr(listen_id_, (sockaddr*)&sin))LOG(__LINE__, "failed to bind addr");
-        if(rdma_listen(listen_id_, 1))LOG(__LINE__, "failed to begin rdma listen");
-        // pd_ = ibv_alloc_pd(listen_id_->verbs);
-        int num_devices{};
-        pd_ = ibv_alloc_pd(rdma_get_devices(&num_devices)[0]);
+        if(rdma_listen(listen_id_, std::thread::hardware_concurrency()))LOG(__LINE__, "failed to begin rdma listen");
+        pd_ = ibv_alloc_pd(ctx_list_[0]);
         if(!pd_)LOG(__LINE__, "failed to alloc pd");
         LOG(__LINE__, "ready to listen");
 
@@ -59,6 +60,7 @@ public:
         for(auto&[id, worker]:worker_map_)worker->stop(), worker->t_->join();
     }
     ~RDMAForwarder(){
+        rdma_free_devices(ctx_list_);
         ibv_dealloc_pd(pd_);
         rdma_destroy_id(listen_id_);
         rdma_destroy_event_channel(chan_);
@@ -68,6 +70,7 @@ private:
     class Worker{
     public:
         Worker(char* dest){
+            //TODO:client移到外面，一个client足够
             client_.connect(dest, server_port);
             data_ = (char*)malloc(sendBytes);
             data_mr_ = client_.reg_mr(data_, sendBytes);
@@ -79,26 +82,17 @@ private:
             for(;;){
                 if(stop_)return;
                 if(recv_wait<cq_len)post_recv(grain), recv_wait++;
-                int wc_num = ibv_poll_cq(cq_,cq_len,wc);
-                if(wc_num){
-                    // LOG(__LINE__, "received wc num:", wc_num);
-                    // if(ibv_get_cq_event(comp_chan_, &cq_, &ctx))LOG(__LINE__, "failed to get cq event");
-                    // if(!ibv_poll_cq(cq_,1,&wc))LOG(__LINE__, "failed to poll cq");
-                    for(int i{};i<wc_num;++i)
-                        switch (wc[i].opcode)
-                        {
+                int wc_num = ibv_poll_cq(cq_, cq_len, wc);
+                if(wc_num)for(int i{};i<wc_num;++i){
+                    switch (wc[i].opcode){
                         case IBV_WC_SEND:{
                             recv_wait--;
-                            // for(uint64_t i{(uintptr_t)data_+send_offset_};i<grain;++i)LOG(data_[i]);
-                            // LOG('\n');
                             client_.post_send(data_, send_offset_, grain);
                             break;
                         }
                         default:
                             break;
-                        }
-                    // ibv_ack_cq_events(cq_, 1);
-                    // if(ibv_req_notify_cq(cq_, 0))LOG(__LINE__, "failed to notify cq");
+                    }
                 }
             }
         }
@@ -107,21 +101,14 @@ private:
             ibv_destroy_cq(cq_);
             ibv_destroy_qp(cm_id_->qp);
             client_.close();
-            // rdma_destroy_id(cm_id_);
-            // ibv_destroy_comp_channel(comp_chan_);
         }
         ~Worker(){
-            // ibv_dereg_mr(resp_mr_);
-            // ibv_dereg_mr(msg_mr_);
-            // ibv_destroy_cq(cq_);
-            // ibv_destroy_comp_channel(comp_chan_);
             free(data_);
             LOG(__LINE__, "worker destroyed");
         }
         rdma_cm_id *cm_id_{};
         char* data_{};
         ibv_mr* data_mr_{};
-        // ibv_comp_channel *comp_chan_{};
         ibv_cq *cq_{};
         uint64_t recv_offset_{}, send_offset_{};
         bool stop_{};
@@ -161,16 +148,8 @@ private:
     };
     void create_connection(rdma_cm_id* cm_id){
         int num_devices{};
-
-        // ibv_comp_channel *comp_chan{ibv_create_comp_channel(listen_id_->verbs)};
-        // ibv_comp_channel *comp_chan{ibv_create_comp_channel(rdma_get_devices(&num_devices)[0])};
-        // if(!comp_chan)LOG(__LINE__, "failed to create ibv comp channel");
-
-        // ibv_cq *cq{ibv_create_cq(listen_id_->verbs, 2, nullptr, comp_chan, 0)};
-        // ibv_cq *cq{ibv_create_cq(rdma_get_devices(&num_devices)[0], 2, nullptr, comp_chan, 0)};
-        ibv_cq *cq{ibv_create_cq(rdma_get_devices(&num_devices)[0], 2*cq_len, nullptr, nullptr, 0)};
+        ibv_cq *cq{ibv_create_cq(ctx_list_[0], 1, nullptr, nullptr, 0)};
         if(!cq)LOG(__LINE__, "failed to create cq");
-        // if(ibv_req_notify_cq(cq, 0))LOG(__LINE__, "failed to notify cq");
 
         ibv_qp_init_attr qp_init_attr{
                         .send_cq = cq,
@@ -186,13 +165,7 @@ private:
         if(rdma_create_qp(cm_id, pd_, &qp_init_attr))LOG(__LINE__, "failed to create qp");
 
         Worker *worker = new Worker(dest_);
-        worker->cm_id_ = cm_id, worker->cq_ = cq;//, worker->comp_chan_ = comp_chan;
-        // worker->msg_mr_ = ibv_reg_mr(pd_, worker->msg_buf_, sizeof(worker->msg_buf_), IBV_ACCESS_LOCAL_WRITE|
-        //                                                                               IBV_ACCESS_REMOTE_READ|
-        //                                                                               IBV_ACCESS_REMOTE_WRITE);
-        // worker->resp_mr_ = ibv_reg_mr(pd_, worker->resp_buf_, sizeof(worker->resp_buf_), IBV_ACCESS_LOCAL_WRITE|
-        //                                                                                  IBV_ACCESS_REMOTE_READ|
-        //                                                                                  IBV_ACCESS_REMOTE_WRITE);
+        worker->cm_id_ = cm_id, worker->cq_ = cq;
         worker->t_ = new std::thread(&Worker::run, worker);
         worker_map_[cm_id] = worker;
         if(rdma_accept(cm_id, nullptr))LOG(__LINE__, "failed to accept connection");
@@ -200,6 +173,7 @@ private:
     }
     bool stop_{};
     char dest_[20];
+    ibv_context** ctx_list_{};
     rdma_event_channel *chan_{};
     rdma_cm_id *listen_id_{};
     ibv_pd *pd_{};

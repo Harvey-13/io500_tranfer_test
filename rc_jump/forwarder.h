@@ -5,6 +5,14 @@ public:
     RDMAForwarder() = default;
     void transfer(char* source, char* dest, int listen_port){
         strncpy(dest_, dest, strlen(dest));
+        int num_devices{};
+        pd_ = ibv_alloc_pd(rdma_get_devices(&num_devices)[0]);
+        if(!pd_)LOG(__LINE__, "failed to alloc pd");
+        data_ = (char*)malloc(sendBytes+8);
+        data_mr_ = ibv_reg_mr(pd_, data_, sendBytes+8, IBV_ACCESS_LOCAL_WRITE|
+                                                            IBV_ACCESS_REMOTE_READ|
+                                                            IBV_ACCESS_REMOTE_WRITE);
+        memset(data_, 0, sizeof(data_));
         chan_ = rdma_create_event_channel();
         if(!chan_)LOG(__LINE__, "failed to create event channel");
 
@@ -21,9 +29,7 @@ public:
         if(rdma_bind_addr(listen_id_, (sockaddr*)&sin))LOG(__LINE__, "failed to bind addr");
         if(rdma_listen(listen_id_, 1))LOG(__LINE__, "failed to begin rdma listen");
         // pd_ = ibv_alloc_pd(listen_id_->verbs);
-        int num_devices{};
-        pd_ = ibv_alloc_pd(rdma_get_devices(&num_devices)[0]);
-        if(!pd_)LOG(__LINE__, "failed to alloc pd");
+        
         LOG(__LINE__, "ready to listen");
 
         std::thread watcher([this](){
@@ -97,10 +103,6 @@ private:
                         .qp_type = IBV_QPT_RC
                     };
         if(rdma_create_qp(cm_id, pd_, &qp_init_attr))LOG(__LINE__, "failed to create qp");
-        data_ = (char*)malloc(sendBytes+8);
-        data_mr_ = ibv_reg_mr(pd_, data_, sendBytes+8, IBV_ACCESS_LOCAL_WRITE|
-                                                            IBV_ACCESS_REMOTE_READ|
-                                                            IBV_ACCESS_REMOTE_WRITE);
 
         CData cdata{};
         cdata.rkey = data_mr_->rkey;
@@ -110,7 +112,7 @@ private:
         conn_param.private_data_len = sizeof(cdata);
         conn_param.responder_resources = 1;
         if(rdma_accept(cm_id, &conn_param))LOG(__LINE__, "failed to accept connection");
-
+        LOG(cm_id, "connected");
         client_map_[cm_id] = new RDMAClient();
         client_map_[cm_id]->connect(dest_, server_port);
     }
@@ -124,5 +126,3 @@ private:
     uint64_t offset_{};
     std::map<rdma_cm_id*, RDMAClient*> client_map_{};
 };
-
- 

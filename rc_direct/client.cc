@@ -1,8 +1,9 @@
 #include "client.h"
 using ll = long long;
-const ll sendBytes{1ll<<34};
+ll sendBytes{1ll<<20};
 
-int main(){
+int main(int argc, char**argv){
+    if(argc==2)sendBytes = atoi(argv[1])*sendBytes;
     RDMAClient client;
     client.connect("192.168.200.12", 13333);
     auto data = (char*)malloc(sendBytes);

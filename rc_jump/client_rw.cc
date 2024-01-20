@@ -1,9 +1,9 @@
-#include "client.h"
+#include "client_rw.h"
 using ll = long long;
 
 
 int main(){
-    RDMAClient client;
+    RDMAClientRW client;
     client.connect("192.168.200.12", forwarder_port);
     auto data = (char*)malloc(sendBytes+8);
     client.reg_mr(data, sendBytes+8);
@@ -11,7 +11,7 @@ int main(){
     LOG(__LINE__, "connected");
     for(ll i{};i<(sendBytes-grain);i+=grain){
         client.remote_write(data, i, grain);
-        client.update_remote_offset(data, sendBytes);
+        client.update_remote_offset();
     }
     client.close();
     free(data);

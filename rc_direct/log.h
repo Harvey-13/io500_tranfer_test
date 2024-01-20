@@ -14,8 +14,8 @@
 #include <rdma/rdma_verbs.h>
 #include <infiniband/verbs.h>
 #include "../histogram/histogram.h"
-const int grain{1024*1024};
-const int cq_len{64};
+const int grain{47*1024};
+const int cq_len{1};
 
 struct LOGGER {
     template<typename... Args>

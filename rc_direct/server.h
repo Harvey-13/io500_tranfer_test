@@ -69,56 +69,33 @@ private:
             lat_hist_.Clear();
         };
         void run(){
-            ibv_wc wc[cq_len]{};
-            void *ctx{};
             uint64_t timer{}, start{};
             uint64_t recv_bytes{}, recv_wait{}, recv_cnt{};
             for(;;){
                 if(stop_){
                     LOG(lat_hist_.ToString());
                     LOG("throughput(MB/s):", recv_bytes/1024.0/1024/(timer-start)*1e9);
+                    LOG("Total received package num:", recv_cnt);
+                    LOG("Total received MiB:", recv_bytes/1024.0/1024);
                     return;
                 }
                 if(recv_wait<cq_len)post_recv(grain), recv_wait++;
-                int wc_num = ibv_poll_cq(cq_,cq_len,wc);
-                recv_wait -= wc_num;
-                if(wc_num){
-                    // LOG(__LINE__, "received wc num:", wc_num);
-                    if(!start)start = timer = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock().now().time_since_epoch()).count();
-                    else{
-                        uint64_t now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                        std::chrono::steady_clock().now().time_since_epoch()).count();
-                        lat_hist_.Add((now - timer)/1000.0/wc_num);
-                        timer = now;
-                    }
-                    // if(ibv_get_cq_event(comp_chan_, &cq_, &ctx))LOG(__LINE__, "failed to get cq event");
-                    // if(!ibv_poll_cq(cq_,1,&wc))LOG(__LINE__, "failed to poll cq");
-                    for(int i{};i<wc_num;++i)
-                        switch (wc[i].opcode)
-                        {
-                        case IBV_WC_RECV:{
-                            // LOG(__LINE__, "server recv:", msg_buf_);
-                            // std::fill(resp_buf_, resp_buf_+sizeof(resp_buf_), 0);
-                            // strcpy(resp_buf_, msg_buf_);
-                            // LOG("receive: ", msg_buf_);
-                            // std::reverse(resp_buf_, resp_buf_+strlen(resp_buf_));
-                            // post_send(grain);
-                            // std::fill(msg_buf_, msg_buf_+sizeof(msg_buf_), 0);
-                            recv_bytes += grain, recv_cnt++;
-                            // LOG("recv_bytes", recv_bytes);
-                            // if(recv_cnt % 1000 == 0){
-                            //     LOG(lat_hist_.ToString());
-                            //     LOG("throughput(MB/s):", recv_bytes/1024.0/1024/(timer-start)*1e9);
-                            // }
-                            break;
-                        }
-                        default:
-                            break;
-                        }
-                    // ibv_ack_cq_events(cq_, 1);
-                    // if(ibv_req_notify_cq(cq_, 0))LOG(__LINE__, "failed to notify cq");
+                // int wc_num = ibv_poll_cq(cq_,cq_len,wc);
+                ibv_poll_cq_attr cq_attr{};
+                int ret = ibv_start_poll(cq_ex_, &cq_attr);
+                if(ret==ENOENT)continue;
+                else recv_wait--;
+                // LOG("received", msg_buf_);
+                if(!start)start = timer = ibv_wc_read_completion_wallclock_ns(cq_ex_);
+                else{
+                    uint64_t last_timer{timer};
+                    timer = ibv_wc_read_completion_wallclock_ns(cq_ex_);
+                    lat_hist_.Add((timer - last_timer)/1e3);
                 }
+                if(ibv_wc_read_opcode(cq_ex_)==IBV_WC_RECV){
+                    recv_bytes += grain, recv_cnt++;
+                }
+                ibv_end_poll(cq_ex_);
             }
         }
         void stop(){
@@ -139,8 +116,9 @@ private:
         }
         rdma_cm_id *cm_id_{};
         ibv_mr *resp_mr_{}, *msg_mr_{};
-        char resp_buf_[grain*cq_len]{}, msg_buf_[grain*cq_len]{};
+        char resp_buf_[grain*cq_len+1]{}, msg_buf_[grain*cq_len+1]{};
         // ibv_comp_channel *comp_chan_{};
+        ibv_cq_ex *cq_ex_{};
         ibv_cq *cq_{};
 
         bool stop_{};
@@ -185,13 +163,22 @@ private:
 
         // ibv_cq *cq{ibv_create_cq(listen_id_->verbs, 2, nullptr, comp_chan, 0)};
         // ibv_cq *cq{ibv_create_cq(rdma_get_devices(&num_devices)[0], 2, nullptr, comp_chan, 0)};
-        ibv_cq *cq{ibv_create_cq(rdma_get_devices(&num_devices)[0], cq_len, nullptr, nullptr, 0)};
-        if(!cq)LOG(__LINE__, "failed to create cq");
         // if(ibv_req_notify_cq(cq, 0))LOG(__LINE__, "failed to notify cq");
+        Worker *worker = new Worker;
+        ibv_cq_init_attr_ex cq_attr_ex{};
+        cq_attr_ex.cqe = cq_len;
+        cq_attr_ex.cq_context = nullptr;
+        cq_attr_ex.channel = nullptr;
+        cq_attr_ex.comp_vector = 0;
+        cq_attr_ex.wc_flags = IBV_WC_EX_WITH_COMPLETION_TIMESTAMP_WALLCLOCK;
+        worker->cq_ex_ = ibv_create_cq_ex(rdma_get_devices(&num_devices)[0], &cq_attr_ex);
+        worker->cq_ = ibv_cq_ex_to_cq(worker->cq_ex_);
+        // ibv_cq *cq{ibv_create_cq(rdma_get_devices(&num_devices)[0], cq_len, nullptr, nullptr, 0)};
+        if(!worker->cq_)LOG(__LINE__, "failed to create cq");
 
         ibv_qp_init_attr qp_init_attr{
-                        .send_cq = cq,
-                        .recv_cq = cq,
+                        .send_cq = worker->cq_,
+                        .recv_cq = worker->cq_,
                         .cap{
                             .max_send_wr = cq_len,
                             .max_recv_wr = cq_len,
@@ -201,9 +188,7 @@ private:
                         .qp_type = IBV_QPT_RC
                     };
         if(rdma_create_qp(cm_id, pd_, &qp_init_attr))LOG(__LINE__, "failed to create qp");
-
-        Worker *worker = new Worker;
-        worker->cm_id_ = cm_id, worker->cq_ = cq;//, worker->comp_chan_ = comp_chan;
+        worker->cm_id_ = cm_id;
         worker->msg_mr_ = ibv_reg_mr(pd_, worker->msg_buf_, sizeof(worker->msg_buf_), IBV_ACCESS_LOCAL_WRITE|
                                                                                       IBV_ACCESS_REMOTE_READ|
                                                                                       IBV_ACCESS_REMOTE_WRITE);
