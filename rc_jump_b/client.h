@@ -3,7 +3,7 @@
 class RDMAClient{
 public:
     RDMAClient()=default;
-    void connect(char* ip, int port){
+    void connect(const char* ip, int port){
         chan_ = rdma_create_event_channel();
         if(!chan_)LOG(__LINE__, "failed to create rdma chan");
 
@@ -68,6 +68,7 @@ public:
         while(wc_wait_>=cq_len){
             wc_wait_ -= ibv_poll_cq(cq_,cq_len,wc_);
         }
+        LOG("post send", cnt_++);
         ibv_sge sge{
                 .addr = (uint64_t)msg+offset,
                 .length = len,
@@ -124,6 +125,7 @@ public:
         rdma_destroy_id(cm_id_);
         rdma_destroy_event_channel(chan_);
     }
+
 private:
     rdma_event_channel *chan_{};
     rdma_cm_id *cm_id_{};
@@ -133,4 +135,6 @@ private:
     ibv_wc wc_[cq_len]{};
     std::map<void*, ibv_mr*> outer_mr_map_{};
     uint64_t wc_wait_{};
+
+    uint64_t cnt_{};
 };

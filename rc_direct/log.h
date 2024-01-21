@@ -14,8 +14,11 @@
 #include <rdma/rdma_verbs.h>
 #include <infiniband/verbs.h>
 #include "../histogram/histogram.h"
-const int grain{47*1024};
-const int cq_len{1};
+const int grain{64*1024};
+const int cq_len{64};
+const int server_port{13333};
+const int forwarder_port{14444};
+uint64_t sendPacks{10000};
 
 struct LOGGER {
     template<typename... Args>

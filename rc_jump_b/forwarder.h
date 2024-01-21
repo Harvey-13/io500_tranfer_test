@@ -47,7 +47,6 @@ public:
                 LOG("client", event->id, "disconnected");
                 rdma_ack_cm_event(event);
                 break;
-                break;
             }
             default:
                 rdma_ack_cm_event(event);
@@ -69,25 +68,33 @@ public:
 private:
     class Worker{
     public:
-        Worker(char* dest){
-            //TODO:client移到外面，一个client足够
+        Worker(char* dest, ibv_pd* pd){
             client_.connect(dest, server_port);
-            data_ = (char*)malloc(sendBytes);
-            data_mr_ = client_.reg_mr(data_, sendBytes);
+            data_ = (char*)malloc(sendPacks*grain);
+            client_.reg_mr(data_, sendPacks*grain);
+            data_mr_ = ibv_reg_mr(pd, data_, sendPacks*grain, IBV_ACCESS_LOCAL_WRITE|
+                                                 IBV_ACCESS_REMOTE_READ|
+                                                 IBV_ACCESS_REMOTE_WRITE);
         }
         void run(){
             ibv_wc wc[cq_len]{};
             uint64_t timer{}, start{};
             uint64_t recv_wait{};
             for(;;){
-                if(stop_)return;
-                if(recv_wait<cq_len)post_recv(grain), recv_wait++;
+                if(stop_){
+                    LOG("forwarded num:", recv_num_);
+                    return;
+                }
+                if(recv_wait<cq_len&&recv_num_+recv_wait<sendPacks)post_recv(grain), recv_wait++;
                 int wc_num = ibv_poll_cq(cq_, cq_len, wc);
+                recv_num_ += wc_num;
                 if(wc_num)for(int i{};i<wc_num;++i){
                     switch (wc[i].opcode){
-                        case IBV_WC_SEND:{
+                        case IBV_WC_RECV:{
+                            LOG("post receive", cnt_++);
                             recv_wait--;
                             client_.post_send(data_, send_offset_, grain);
+                            send_offset_ += grain;
                             break;
                         }
                         default:
@@ -97,10 +104,12 @@ private:
             }
         }
         void stop(){
+            while(recv_num_<sendPacks);
+            client_.close();
             stop_=true;
+            ibv_dereg_mr(data_mr_);
             ibv_destroy_cq(cq_);
             ibv_destroy_qp(cm_id_->qp);
-            client_.close();
         }
         ~Worker(){
             free(data_);
@@ -112,7 +121,10 @@ private:
         ibv_cq *cq_{};
         uint64_t recv_offset_{}, send_offset_{};
         bool stop_{};
+        uint64_t recv_num_{};
         std::thread *t_{};
+
+        uint64_t cnt_{};
     private:
         RDMAClient client_;
         void post_recv(int len){
@@ -164,7 +176,7 @@ private:
                     };
         if(rdma_create_qp(cm_id, pd_, &qp_init_attr))LOG(__LINE__, "failed to create qp");
 
-        Worker *worker = new Worker(dest_);
+        Worker *worker = new Worker(dest_, pd_);
         worker->cm_id_ = cm_id, worker->cq_ = cq;
         worker->t_ = new std::thread(&Worker::run, worker);
         worker_map_[cm_id] = worker;
